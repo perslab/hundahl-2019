@@ -4,7 +4,7 @@ R notebooks for reproducing the code in Hundahl et al (2019)
 
 ## Usage
 
-1. clone the repository:`git clone --recurse-submodules https://github.com/perslab/hundahl-2019.git'
+1. clone the repository: `git clone --recurse-submodules https://github.com/perslab/hundahl-2019.git'
 
 2. Open pre-process.Rmd and run the code interactively in RStudio to download and preprocess the sc-RNA dataset 
 
