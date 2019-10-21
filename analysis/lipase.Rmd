@@ -1,0 +1,404 @@
+---
+title: 'Lipase'
+author: "Jon Thompson, Pers lab"
+date: "`r Sys.time()`" 
+output:
+  html_notebook: 
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  html_document:
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+# Setup
+
+## install / load packages packages
+
+```{r}
+library("here")
+library("Seurat")
+library("tidyverse")
+library("Matrix")
+library("cowplot")
+library("parallel")
+library("VGAM")
+library("ggsignif")
+library("MASS")
+
+```
+
+## Source functions
+
+```{r}
+
+source(here("perslab-sc-library", "utility_functions.R"))
+source(here("perslab-sc-library", "functions_sc.R"))
+```
+
+## Set options
+
+```{r}
+
+options(stringsAsFactors = F, warn=1, use="pairwise.complete.obs")
+
+```
+
+## Set constants
+
+```{r} 
+# Set by hand
+
+prefixData <- "campbell" 
+prefixRun <- "seurat_2" 
+
+```
+
+```{r}
+
+randomSeed = 12345
+set.seed(randomSeed)
+
+flagDate = substr(gsub("-","",as.character(Sys.Date())),3,1000)
+
+```
+
+## Load data
+
+```{r}
+# We have previously packaged the data in a seurat object 
+seurat_obj <- load_obj("/projects/jonatan/pub-perslab/17-holst-hsl/RObjects/campbell_all_clust_full.RDS.gz")
+```
+
+# Analysis
+## add new annotation
+
+```{r}
+list_mapping = list("Neurons (12884 cells)"=c("a13","a14", "a15","a16", "a17", "a18"), 
+                    "Oligodendocytes (743 cells)"=c("a01","a02", "a05"),
+                    "Oligodendrocyte precursor cells (626 cells)"=c("a06"),
+                    "Astrocytes (96 cells)"="a10",
+                    "Tanycytes (4666 cells)"=c("a11", "a12"))
+                    #"Tanycytes and ependymocytes (5086 cells)"=c("a09","a11","a12")
+                    #"Endothelial and mural cells (320 cells)"=c("a03","a04"),
+                    #"Peripheral vascular macrophages and microglia (330 cells)"=c("a07"))
+
+new_annot <- seurat_obj@meta.data$clust_all_full
+
+for (celltype_new in names(list_mapping)){
+  for (celltype_orig in list_mapping[[celltype_new]]) {
+    new_annot[grep(celltype_orig, new_annot, ignore.case = T)]<- celltype_new
+  }
+}
+
+table(new_annot)
+```
+
+```{r}
+seurat_obj <- AddMetaData(object = seurat_obj, 
+                          metadata = data.frame("basic_celltype"=new_annot, row.names=rownames(seurat_obj@meta.data)))
+#seurat_obj <- SetAllIdent(object = seurat_obj, id="basic_celltype")
+Idents(seurat_obj) <- seurat_obj$basic_celltype
+seurat_obj_sub <- subset(x = seurat_obj, idents=names(list_mapping))
+table(Idents(seurat_obj_sub))
+```
+
+```{r}
+mito.genes <- grepl(pattern = "^mt-", x = rownames(seurat_obj_sub), ignore.case=T)
+ribo.genes <- grepl(pattern = "^Rp[sl][[:digit:]]", x = rownames(seurat_obj_sub), ignore.case=T)
+colSums_tmp <- colSums(GetAssayData(object = seurat_obj_sub, slot="counts"))
+
+metadata <- data.frame(percent.mito=colSums(x = GetAssayData(seurat_obj_sub, slot="counts")[mito.genes,])/colSums_tmp, 
+                       percent.ribo = colSums(x = GetAssayData(seurat_obj_sub, slot="counts")[ribo.genes,])/colSums_tmp, 
+                       row.names=colnames(seurat_obj_sub))
+seurat_obj_sub <- AddMetaData(object = seurat_obj_sub, metadata=metadata)
+```
+
+
+```{r}
+seurat_obj_sub <- FindVariableFeatures(seurat_obj_sub, selection.method = "vst")
+seurat_obj_sub <- ScaleData(seurat_obj_sub, features = VariableFeatures(seurat_obj_sub), vars.to.regress = c("percent.mito", "percent.ribo", "nCount_RNA"))
+seurat_obj_sub <-RunPCA(object = seurat_obj_sub, 
+                           weight.by.var = F,
+                           npcs = 40,
+                           seed.use=randomSeed,
+                           verbose=T)
+        
+seurat_obj_sub<-RunTSNE(object = seurat_obj_sub, 
+                tsne.method="Rtsne",
+                reduction = "pca",#if (is.null(align_group_IDs) & is.null(align_specify)) "pca" else "cca.aligned", 
+                dims= 1:30, # no need to use all PCs for t-SNE
+                seed.use = randomSeed,
+                #do.fast=T,
+                perplexity=30,
+                check_duplicates=F)
+```
+
+## plots
+Fig S1A. Tsne of major celltypes
+
+```{r,fig.width=12,fig.height=10}
+p1 <- DimPlot(seurat_obj_sub, 
+              do.return = T, 
+              pt.size = 1, 
+              group.by = "basic_celltype", 
+              label=T,
+              repel = T,
+              label.size=6,
+              plot.title=paste0("Campbell et al"))
+p1 <- p1 + theme(legend.position="none")
+saveMeta(savefnc = ggsave, filename =  paste0(dirPlots, prefixData,"_",prefixRun, "_tSNEPlot_clust.pdf"), w=12, h=10)
+
+```
+
+Fig S1 (Lipase featureplots) and Fig 1C (Lipe featureplot)
+```{r}
+lipases <- c("Dagla", "Daglb", "Lipa","Lipe", "Lipg", "Liph", "Lpl", "Mgll", "Pnlip", "Pnpla2", "Pnpla3",
+             "Aadac", "Cel","Lipc", "Lipf", "Lipi","Lipj", "Lipk", "Lipm", "Lipn", "Pnliprp2", "Pnliprp3") 
+
+for (feature in lipases) { 
+tryCatch({p <- FeaturePlot(seurat_obj_sub, 
+               features = feature, 
+               cols=c("grey90", "blue"), 
+               reduction = "tsne",
+               pt.size = 1)
+p <- p + theme(legend.position="none")
+saveMeta(savefnc = ggsave, plot=p, filename =  paste0(dirPlots, prefixData,"_", prefixRun,"_", feature,"_featurePlot.pdf"), w=12, h=10)}, error = function(err) {
+  warning(paste0(feature, " not found"))
+})
+}
+```
+
+# Fig 1C Lipe by major celltype barplot
+### count only Lipe in each celltype
+
+```{r}
+Idents(seurat_obj_sub) <- seurat_obj_sub$basic_celltype
+celltype = Idents(seurat_obj_sub) %>% unique %>% sort(., decreasing = T)
+factor_celltype <- celltype %>% factor(x=., levels = ., ordered = T)
+```
+
+## Lipe 
+### fit a negative binomial distribution to estimate expr levels per celltype
+NB: The mean mu is the same as the Gaussian mean. The difference is the standard error, due to a different distribution
+
+```{r}
+Lipe_negBin <-lapply(as.character(factor_celltype), function(basic_celltype) {
+  modelNegBin <- tryCatch({
+    fitdistr(x = seurat_obj_sub@assays$RNA@counts["Lipe", as.character(Idents(seurat_obj_sub)) == basic_celltype], 
+             densfun = "negative binomial",lower=c(0,0))
+    }, error = function(err) {NA})
+})
+
+names(Lipe_negBin) <- as.character(factor_celltype)
+Lipe_negBin
+
+```
+
+```{r}
+Lipe_mu <- sapply(Lipe_negBin, function(out) {
+  tryCatch({out[[1]][[2]]}, error = function(err) {0})
+})
+
+Lipe_SE <- sapply(Lipe_negBin, function(out) {
+  tryCatch({out[[2]][2]}, error =function(err){0})
+})
+
+df_Lipe <- data.frame("celltype"= factor_celltype,
+                      "expression_mu" = Lipe_mu, 
+                      "expression_SE" = Lipe_SE, row.names = NULL)
+df_Lipe
+```
+
+
+```{r}
+ggplot(data = df_Lipe, aes(celltype, expression_mu,expression_SE)) + 
+geom_col(width = 0.5, fill="blue", position = position_stack(reverse = F)) +
+  geom_errorbar(aes(ymin=expression_mu-expression_SE,
+                    ymax=expression_mu+expression_SE),width=.2,
+                position=position_dodge(0.9)) +
+  coord_flip() + ylab(label = "Mean transcripts per cell") + xlab(label=NULL) +
+  ggtitle(label=NULL)
+saveMeta(savefnc = ggsave, filename =  paste0(dirPlots, prefixData,"_", prefixRun,"_Lipe_by_celltype_barPlot.pdf"), width=10, height=5)
+```
+
+# Fig 1D? Lipe by neuron subtype barplot
+### count only Lipe in each neuron subtype
+
+```{r}
+
+# We have previously merged the neuron and non-neuronal annotations provided with the dataset into a single annotation column called sub_clust_full 
+
+Idents(seurat_obj_sub) <- seurat_obj_sub$clust_sub_full
+table(Idents(seurat_obj_sub))
+```
+
+add number of cells to Agrp and Pomc neuron labels
+
+```{r}
+seurat_obj_sub$clust_sub_full_n <- seurat_obj_sub$clust_sub_full
+agrpCelltypes <- grep("Agrp", unique(seurat_obj_sub$clust_sub_full), value=T)
+pomcCelltypes <- grep("Pomc", unique(seurat_obj_sub$clust_sub_full), value=T)
+for (celltype in c(agrpCelltypes, pomcCelltypes)) {
+  n_celltype <- sum(seurat_obj_sub$clust_sub_full_n ==celltype)
+  seurat_obj_sub$clust_sub_full_n [seurat_obj_sub$clust_sub_full_n ==celltype] <- paste0(celltype, " (", n_celltype, " cells)")
+}
+table(seurat_obj_sub$clust_sub_full_n)
+```
+
+```{r}
+Idents(seurat_obj_sub) <- seurat_obj_sub$clust_sub_full_n
+```
+
+```{r}
+celltype_n = Idents(seurat_obj_sub) %>% as.character %>% unique %>% sort(., decreasing = T)
+
+celltype_n <- grep(pattern="^n\\d{2}", x=celltype_n, value=T)
+
+factor_celltype_n <- celltype_n %>% factor(x=., levels = ., ordered = T)
+```
+
+## Lipe in neuron subtypes
+### fit a negative binomial distribution to estimate expr levels per celltype
+NB: The mean mu is the same as the Gaussian mean. The difference is the standard error, due to a different distribution
+
+```{r}
+Lipe_negBin_n <-lapply(as.character(factor_celltype_n), function(celltype_n) {
+  modelNegBin <- tryCatch({
+    fitdistr(x = seurat_obj_sub@assays$RNA@counts["Lipe", as.character(Idents(seurat_obj_sub)) == celltype_n], 
+             densfun = "negative binomial",lower=c(0,0))
+    }, error = function(err) {NA})
+})
+
+names(Lipe_negBin_n) <- as.character(factor_celltype_n)
+Lipe_negBin_n
+
+```
+
+```{r}
+Lipe_mu_n <- sapply(Lipe_negBin_n, function(out) {
+  tryCatch({out[[1]][[2]]}, error = function(err) {0})
+})
+
+Lipe_SE_n <- sapply(Lipe_negBin_n, function(out) {
+  tryCatch({out[[2]][2]}, error =function(err){0})
+})
+
+df_Lipe_n <- data.frame("celltype"= factor_celltype_n,
+                      "expression_mu" = Lipe_mu_n, 
+                      "expression_SE" = Lipe_SE_n, row.names = NULL)
+df_Lipe_n
+```
+
+```{r, fig.width = 10, fig.height = 15}
+ggplot(data = df_Lipe_n, aes(celltype, expression_mu,expression_SE)) + 
+geom_col(width = 0.5, fill="blue", position = position_stack(reverse = F)) +
+  geom_errorbar(aes(ymin=expression_mu-expression_SE,
+                    ymax=expression_mu+expression_SE),width=.2,
+                position=position_dodge(0.9)) +
+  coord_flip() + ylab(label = "Mean transcripts per cell") + xlab(label=NULL) +
+  ggtitle(label=NULL)
+saveMeta(savefnc = ggsave, filename =  paste0(dirPlots, prefixData,"_", prefixRun,"_Lipe_by_neuron_subtype_barPlot.pdf"), width=10, height=15)
+```
+
+## Fig S1 Lipases mean expression in neurons
+### compute negative binomial mean and SE of all lipases
+
+```{r}
+lipases %>% sort(., decreasing = T) %>% factor(x=., levels = ., ordered = T) -> factor_lipases
+```
+
+```{r}
+seurat_obj_n <- subset(seurat_obj_sub,idents=celltype_n)
+table(Idents(seurat_obj_n)) %>% '['(order(as.character(unique(Idents(seurat_obj_n)))))
+```
+
+```{r}
+expression_negBin_n <- lapply(as.character(factor_lipases), 
+                            function(lipase) {
+  modelNegBin <- tryCatch({
+    fitdistr(x = seurat_obj_n@assays$RNA@counts[lipase,],densfun = "negative binomial")
+    }, error=function(err) {NA})
+  }) 
+
+expression_mu_n <- sapply(expression_negBin_n, function(out) {
+  if (all(is.na(out))) 0 else out[[1]][2]
+})
+expression_SE_n <- sapply(expression_negBin_n, function(out) {
+  if (all(is.na(out))) 0 else out[[2]][2]
+})
+
+df_lipasesExpr_n <- data.frame(lipase = factor_lipases, 
+                             "expression_mu" = expression_mu_n, 
+                             "expression_SE" = expression_SE_n)
+df_lipasesExpr_n
+
+```
+
+```{r, fig.width=8, fig.height=9}
+ggplot(data = df_lipasesExpr_n, aes(lipase, expression_mu, expression_SE)) +
+  coord_flip() +
+  geom_col(width=0.5, fill="blue", position = position_stack(reverse = T)) +
+
+  geom_errorbar(aes(ymin=expression_mu-expression_SE,
+                    ymax=expression_mu+expression_SE),width=.2,
+                position=position_dodge(.9)) + 
+  ylab(label = "Mean transcripts per cell") + xlab(label=NULL) +
+  ggtitle(label="Lipase expression in neurons") + #geom_signif() #stat_compare_means(method="kruskal.test")
+saveMeta(savefnc=ggsave, filename =  paste0(dirPlots, prefixData,"_", prefixRun,"_lipases_neurons_meanExpr_barPlot.pdf"), width=8, height=9)
+```
+
+# Group neuron subclusters based on their expression of Nr5a1, which codes for steoidogenic factor-1 (Sf-1)
+
+```{r}
+
+Nr5a1_negBin_n <-lapply(as.character(factor_celltype_n), function(celltype_n) {
+  modelNegBin <- tryCatch({
+    fitdistr(x = seurat_obj_n@assays$RNA@counts["Nr5a1", as.character(Idents(seurat_obj_n)) == celltype_n], 
+             densfun = "negative binomial",lower=c(0,0))
+    }, error = function(err) {
+      list("estimate"=c("size"=NA, "mu"=mean(seurat_obj_n@assays$RNA@counts["Nr5a1", as.character(Idents(seurat_obj_n)) == celltype_n])), 
+           "sd"= c("size"=NA, "mu"=NA))
+    })
+})
+
+names(Nr5a1_negBin_n) <- as.character(factor_celltype_n)
+Nr5a1_negBin_n
+
+```
+
+```{r}
+Nr5a1_mu_n <- sapply(Nr5a1_negBin_n, function(out) {
+  tryCatch({out[[1]][[2]]}, error = function(err) {0})
+})
+
+Nr5a1_SE_n <- sapply(Nr5a1_negBin_n, function(out) {
+  tryCatch({out[[2]][2]}, error =function(err){0})
+})
+
+df_Nr5a1_n <- data.frame("celltype"= factor_celltype_n,
+                      "expression_mu" = Nr5a1_mu_n, 
+                      "expression_SE" = Nr5a1_SE_n, row.names = NULL)
+df_Nr5a1_n
+```
+
+```{r, fig.width = 10, fig.height = 15}
+ggplot(data = df_Nr5a1_n, aes(celltype, expression_mu,expression_SE)) + 
+geom_col(width = 0.5, fill="blue", position = position_stack(reverse = F)) +
+  geom_errorbar(aes(ymin=expression_mu-expression_SE,
+                    ymax=expression_mu+expression_SE),width=.2,
+                position=position_dodge(0.9)) +
+  coord_flip() + ylab(label = "Mean transcripts per cell") + xlab(label=NULL) +
+  ggtitle(label=NULL)
+saveMeta(savefnc = ggsave, filename =  paste0(dirPlots, prefixData,"_", prefixRun,"_Nr5a1_by_neuron_subtype_barPlot.pdf"), width=10, height=15)
+```
+
+
+
+
