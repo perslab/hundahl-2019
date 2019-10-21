@@ -1,0 +1,256 @@
+---
+title: 'Campbell sc-RNA seq - preprocess'
+author: "Pers lab"
+date: "`r Sys.time()`" 
+output:
+  html_notebook: 
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  html_document:
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+# Setup
+
+## load packages 
+
+```{r}
+
+library("here")
+library("Seurat")
+library("dplyr")
+library("Matrix")
+library("cowplot")
+library("parallel")
+
+```
+
+## source functions
+
+```{r}
+source(here("perslab-sc-library", "utility_functions.R"))
+source(here("perslab-sc-library", "functions_sc.R"))
+```
+
+## Set options
+
+```{r}
+options(stringsAsFactors = F, use="pairwise.complete.obs", warn=1)
+```
+
+## Set constants
+
+```{r}
+dir_project = "/projects/jonatan/tmp-holst-hsl/"
+dir_plots = paste0(dir_project,"plots/")
+dir_tables = paste0(dir_project,"tables/")
+dir_log = paste0(dir_project,"log/")
+
+prefix_data = "campbell"
+flag_date = substr(gsub("-","",as.character(Sys.Date())),3,1000)
+prefix_out <- "seurat_1"
+
+```
+
+# Download data
+
+```{r}
+download_url.data <- "ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE93nnn/GSE93374/suppl/GSE93374_Merged_all_020816_DGE.txt.gz"
+
+download_url.metadata <- "ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE93nnn/GSE93374/suppl/GSE93374_cell_metadata.txt.gz"
+path.data = here("data","GSE93374_Merged_all_020816_DGE.txt.gz")
+path.metadata <- here("data", "GSE93374_cell_metadata.txt.gz")
+
+```
+
+```{r}
+if (!file.exists(path.data)) {
+ download.file(download_url.data, destfile=path.data) 
+}
+
+if (!file.exists(path.metadata)) {
+ download.file(download_url.metadata, destfile=path.metadata) 
+}
+```
+
+## Load sequencer data and do all QC
+
+expression data
+
+```{r}
+# load data
+seurat_object.data <- read.csv(gzfile(path.data),sep="\t")
+```
+
+metadata 
+
+```{r} 
+
+campMeta <- read.delim(path.metadata, quote = "", stringsAsFactors = F)
+# intialize Seurat object
+# keep all genes expressed in => 5 cells and all cells with at least 200 detected genes
+rownames(campMeta) <- campMeta[["X1.ID"]]
+campMeta <- campMeta[match(colnames(seurat_object.data), rownames(campMeta)),]
+
+```
+
+clear up non-alphanumeric characters in metadata
+
+```{r}
+campMeta[] <- apply(X=campMeta, MARGIN = 2, FUN = function(eachCol) {
+  gsub("/|\\(|\\)","_", eachCol)
+})
+
+```
+
+remove NA column 
+
+```{r}
+campMeta <- campMeta[,-12]
+```
+
+create Seurat object
+
+```{r}
+seurat_obj <- CreateSeuratObject(counts = seurat_object.data,
+                             project = "ARCUATE_NUCLEUS",
+                             min.cells=5,
+                             meta.data = campMeta)
+
+```
+
+# add percent mito and ribo to metadata
+
+```{r}
+# Find mito + ribo gene percentages and nUMI and nGene and append to cells as meta data
+mito.genes <- grep(pattern = "^mt-", x = rownames(x = seurat_obj), value = TRUE)
+ribo.genes <- grep(pattern = "^Rp[sl][[:digit:]]", x = rownames(x = seurat_obj), value = TRUE)
+
+percent.mito <- Matrix::colSums(seurat_obj@assays$RNA@counts[mito.genes, ])/Matrix::colSums(seurat_obj@assays$RNA@counts)
+percent.ribo <- Matrix::colSums(seurat_obj@assays$RNA@counts[ribo.genes, ])/Matrix::colSums(seurat_obj@assays$RNA@counts)
+
+seurat_object <- AddMetaData(object = seurat_obj, metadata = percent.mito, col.name = "percent.mito")
+seurat_object <- AddMetaData(object = seurat_obj, metadata = percent.ribo, col.name = "percent.ribo")
+
+```
+
+Filter out cells whose gene reads are outside an appropriate range 
+
+```{r}
+seurat_obj <- subset(x = seurat_obj, 
+                     subset = nFeature_RNA > 200 & nFeature_RNA < 10000 & percent.mito < 0.25)
+
+```
+
+Normalize the data
+
+```{r}
+
+seurat_object <- NormalizeData(object = seurat_object, normalization.method = "LogNormalize")
+
+```
+
+Find variable genes  
+
+```{r}
+
+seurat_obj <- FindVariableFeatures(object = seurat_obj,
+                                   nfeatures = 2000,
+                                   selection.method="vst", 
+                                   verbose=T)
+
+length(VariableFeatures(seurat_obj)) # Check how many genes are variable
+
+```
+
+Scale the data and regress out confounders 
+
+```{r}
+
+seurat_object <- ScaleData(object = seurat_object, 
+                           vars.to.regress = c("nCount_RNA", "percent.mito"), 
+                           features=VariableFeatures(seurat_object),
+                           block.size=15000,
+                           min.cells.to.block=5000,
+                           verbose=T)
+```
+
+Run PCA
+
+```{r}
+
+seurat_object <- RunPCA(object = seurat_object, 
+                        pc.genes = VariableFeatures(seurat_object), 
+                        pcs.compute=50, 
+                        do.print = F)#, pcs.print = 1:5, genes.print = 5)
+
+# Elbow plot --> draw your cutoff where there is a clear elbow in the graph
+PCElbowPlot(object = seurat_object)
+pc_num = 9
+
+seurat_object <- RunTSNE(object = seurat_object, dims.use = 1:pc_num, do.fast = TRUE)
+
+```
+
+## Reorganise annotations
+
+```{r}
+df_metadata <- data.frame(clust_all_full = as.character(seurat_obj$X7.clust_all), 
+                          clust_sub_full = as.character(seurat_obj$X10.clust_neurons))
+
+```
+
+### subclusters
+
+```{r}
+
+for (cellID in unique(df_metadata$clust_all_full)) {
+   if (length(grep(cellID, seurat_obj$All.Cell.Clusters, value=T))) {
+    df_metadata$clust_all_full[df_metadata$clust_all_full==cellID] <- grep(cellID, seurat_obj$All.Cell.Clusters, value=T)
+   }
+} 
+
+table(df_metadata$clust_all_full)
+```
+
+```{r}
+for (cellID in unique(df_metadata$clust_sub_full)) {
+  if (cellID=="miss") next
+  if (length(grep(cellID, seurat_obj$Neuron.Subclusters, value=T))) {
+    df_metadata$clust_sub_full[df_metadata$clust_sub_full==cellID] <- grep(cellID, seurat_obj$Neuron.Subclusters, value=T)
+  }
+}
+
+table(df_metadata$clust_sub_full)
+```
+
+Add the full annotations to the n03, n07, n08 and n27 celltypes
+
+```{r}
+for (i in 1:4) {
+  cellID <- c("n03", "n07", "n08", "n27")
+  cellIDFull <- c("n03.Th_SSt", "n07.Arx_Nr5a2", "n08.Th_Slc6a3", "n27.Tbx19")
+  df_metadata$clust_sub_full[df_metadata$clust_sub_full==cellID[i]] <- cellIDFull[i]
+}
+
+table(df_metadata$clust_sub_full)
+```
+
+```{r}
+rownames(df_metadata) <- rownames(seurat_obj@meta.data)
+seurat_obj<-AddMetaData(object=seurat_obj, metadata=df_metadata)
+```
+
+write out file to disk 
+
+```{r}
+saveRDS(seurat_obj, file = here(data, "campbell_all_clust_full.RDS.gz"), compress="gzip")
+```
+
